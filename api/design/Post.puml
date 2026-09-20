@@ -1,0 +1,916 @@
+@startuml sequence_diagram
+!theme plain
+
+skinparam sequenceMessageAlign center
+skinparam maxMessageSize 200
+skinparam noteBackgroundColor lightyellow
+skinparam noteTextColor black
+autonumber 1.0
+
+title POST CHAT API
+
+actor Client
+
+participant "src/main.py" as Main
+participant "src/settings.py" as AppSettings
+participant "src/migration/migration.py" as Migration
+participant "src/routes/router.py" as AgentRouter
+participant "src/models/model.py" as ValidationModel
+participant "src/service/agent_service.py" as AgentService
+participant "src/service/conditional_edge_service.py" as ConditionalEdges
+participant "src/service/graph_nodes.py" as GraphNodes
+participant "src/service/utils/llm_call_utils.py" as DecisionMakerLlm
+participant "src/service/utils/bedrock_client.py" as BedrockClient
+participant "src/service/agents/agent.py" as Agent
+participant "src/service/agents/agent.py" as CoderAgent
+participant "src/service/agents/agent.py" as ReviewerAgent
+participant "src/service/agents/agent.py" as ResearcherAgent
+participant "src/utils/llm_response_utils.py" as LlmResponseHandler
+participant "src/service/agents/agent_builder.py" as AgentBuilder
+participant "src/service/agents/langchain_llm.py" as BedrockLlm
+participant "src/service/agents/mcp_loader.py" as McpLoader
+participant "src/service/agents/prompt.py" as PromptBuilder
+participant "src/repositories/database.py" as Database
+participant "src/repositories/schemas/schema.py" as Schema
+participant "src/utils/response_utils.py" as ResponseFormatter
+
+activate Client
+activate Main
+
+    group Main
+        group initialize_config — fetch server configuration
+            Main -> Main : call fetch_server_config to load configuration
+            Main -> AppSettings : move to AppSettings to load config
+            activate AppSettings
+            group AppSettings
+                group Config
+                    AppSettings -> AppSettings : read configuration values from environment
+                    AppSettings --> Main : return server_config
+                end
+            end
+            deactivate AppSettings
+            Main -> Main : store returned values in server_config variable
+        end
+
+        group create_app — initialize FastAPI application
+            Main -> Main : initialize FastAPI and store in app variable
+            Main -> Main : attach CORSMiddleware with allowed_methods and allow_origins
+            Main -> Main : register router in app
+            Main -> Migration : move to Migration to run database migration
+            activate Migration
+            group Migration
+                group initialize_database — set up database tables
+                    Migration -> Database : create database instance and session
+                    activate Database
+                    group Database
+                        group __new__ — singleton initialization
+                            note over Database
+                                Singleton __new__ called
+                                _instance is None → create new instance
+                            end note
+                            Database -> Database : call super.__new__ if instance not yet created
+                            Database -> Database : call initialize_engine to set up engine
+                            Database -> Database : call create_engine to create single engine instance
+                            Database -> Database : call sessionmaker to create session factory
+                            Database --> Database : engine initialized successfully
+                            Database -> Database : reuse singleton database instance across all operations
+                        end
+                        Database --> Migration : return database_instance
+                    end
+                    deactivate Database
+                    Migration -> Migration : migration and seeding completed successfully
+                    Migration --> Main : return control to Main
+                end
+            end
+            deactivate Migration
+            Main -> Main : register global exception handler for pydantic validation errors
+        end
+
+        group run_local_server — start uvicorn server
+            Main -> Main : call create_app and store result in app variable
+            Main -> Main : start uvicorn with app, host, and port from server_config
+        end
+    end
+
+Client -> Main : POST /api/v1/chatbot/123e4567-e89b-12d3-a456-426655440000
+    note over Main
+        Request Body:
+        {
+          "user_query": "generate a code",
+          "thread_id": "123e4567-e89b-12d3-a456-426655440000"
+        }
+    end note
+
+    Main -> AgentRouter : forward request to AgentRouter
+    activate AgentRouter
+    AgentRouter -> ValidationModel : fetch APIResponse and UserRequest models
+            activate ValidationModel
+            group ValidationModel
+                group APIResponse | UserRequest — validation models
+                    ValidationModel -> ValidationModel : return requested validation models
+                    ValidationModel --> AgentRouter : return validation models
+                end
+            end
+            deactivate ValidationModel
+    group AgentRouter
+        group init — dependencies
+            AgentRouter -> AgentRouter : create agent_service variable and assign AgentService instance
+        end
+        group process_query_route — validate and route user query
+            AgentRouter -> AgentRouter : validate UUID path parameter via pydantic global validator
+            AgentRouter -> AgentRouter : create request_id and assign new UUID value
+            alt try
+                AgentRouter -> AgentRouter : parse request body using request.json and store in request_payload
+                alt if error during JSON parsing
+                    AgentRouter -> AgentRouter : raise exception — JSON parsing failed
+                end
+                alt if user_query field is missing
+                    AgentRouter -> AgentRouter : raise NotFoundException — user_query is required
+                end
+                AgentRouter -> AgentRouter : create UserRequest instance and pass request_payload for validation
+                AgentRouter -> AgentService : call agent_service with request_data as argument
+                activate AgentService
+                group AgentService
+                    group __init__ — initialize service dependencies
+                        AgentService -> AgentService : create GraphNodes instance and store in graph_nodes variable
+                        AgentService -> AgentService : create ConditionalEdges instance and store in conditional_edges variable
+                        AgentService -> ValidationModel : get the State model
+                        activate ValidationModel
+                        group ValidationModel
+                            group State — graph state model
+                                ValidationModel -> ValidationModel : return State model
+                                ValidationModel --> AgentService : return State model
+                            end
+                        end
+                        deactivate ValidationModel
+                    end
+
+                    group agent_service — orchestrate agent call
+                        alt try
+                            AgentService -> AgentService : create checkpointer using connection string
+                            AgentService -> AgentService : call setup on checkpointer to create tables
+                            AgentService -> AgentService : call graph_builder to build the agent flow and pass the checkpointer
+
+                            group graph_builder — build the LangGraph workflow
+                                alt try
+                                    AgentService -> AgentService : create StateGraph and pass the defined custom State
+                                    AgentService -> AgentService : add node user_intent_identifier from graph_nodes instance
+                                    AgentService -> AgentService : add node code_agent_node from graph_nodes instance
+                                    AgentService -> AgentService : add node review_agent_node from graph_nodes instance
+                                    AgentService -> AgentService : add node research_agent_node from graph_nodes instance
+                                    AgentService -> GraphNodes : move node definitions to GraphNodes
+                                    activate GraphNodes
+                                    group GraphNodes
+                                        group __init__ — initialize agent and llm instances
+                                            GraphNodes -> GraphNodes : create CoderAgent instance and store in code_agent variable
+                                            GraphNodes -> GraphNodes : create ResearcherAgent instance and store in research_agent variable
+                                            GraphNodes -> GraphNodes : create ReviewerAgent instance and store in review_agent variable
+                                            GraphNodes -> GraphNodes : create DecisionMakerLlm instance and store in decision_llm variable
+                                        end
+
+                                        GraphNodes -> Agent : move to base Agent class
+                                        activate Agent
+                                        group Agent
+                                            group __init__ — initialize agent dependencies
+                                                Agent -> Agent : create PromptBuilder instance and store in prompt_builder variable
+                                                Agent -> Agent : create AgentBuilder instance and store in agent_builder variable
+                                                Agent -> Agent : create LlmResponseHandler instance and store in llm_response_handler variable
+                                                Agent -> Agent : create McpLoader instance and store in mcp_loader variable
+                                            end
+
+                                            group invoke_agent — build and run agent
+                                                alt try
+                                                    Agent -> Agent : call fetch_system_prompt using prompt_builder and pass agent name as argument
+                                                    Agent -> PromptBuilder : move to PromptBuilder to get system prompt
+                                                    activate PromptBuilder
+                                                    group PromptBuilder
+                                                        group fetch_system_prompt — return configured system prompt
+                                                            PromptBuilder -> PromptBuilder : return system_prompt string based on name parameter
+                                                            note over PromptBuilder
+                                                         SYSTEM_PROMPT = """
+                                                            <Role>
+                                                            You are an expert Python code generator in a multi-agent pipeline.
+                                                            </Role>
+
+                                                            <Objective>
+                                                                You receive inputs from two upstream agents:
+                                                                - researcher_output: relevant docs, APIs, patterns, and examples (may be empty)
+                                                                - reviewer_feedback: improvement suggestions on previously generated code (may be empty)
+                                                                
+                                                                Always prioritize reviewer_feedback over your own assumptions when present.
+                                                                Always use researcher_output as your technical reference when present.
+                                                            </Objective>
+
+                                                            <Instructions>
+                                                                1. Analyze the user query precisely 
+                                                                2. If researcher_output is present, base your implementation on it use research output details
+                                                                3. If reviewer_feedback is present, fix ONLY what is flagged — don't rewrite unrelated parts.
+                                                                4. Write clean, production-ready Python.
+                                                                5. Always include:
+                                                                    - Type hints on all functions
+                                                                    - Docstrings (one-liner for simple, full for complex)
+                                                                    - Inline comments for non-obvious logic
+                                                                    - Error handling where failure is likely
+                                                            </Instructions>
+
+                                                            <constraints>
+                                                                - Python only. No other languages.
+                                                                - If the query is unclear, ask ONE specific clarifying question before generating.
+                                                                - Do not repeat reviewer feedback back - just apply it.
+                                                            </constraints>
+                                                            """
+                                                                    elif(name=="Reviewer"):
+                                                                        SYSTEM_PROMPT = """
+                                                            <Role>
+                                                            You are a senior Python code reviewer in a multi-agent pipeline.
+                                                            </Role>
+
+                                                            <Objective>
+                                                                You receive code generated by a coder agent.
+                                                                Your feedback goes directly back to the coder agent for revision.
+                                                                Be specific enough that the coder can fix issues without guessing.
+                                                            </Objective>
+                                                            <Review_checklist>
+                                                                Check strictly in this order:
+                                                                Correctness    - Does the code actually solve the user's request?
+                                                                Error handling - Are failures caught and handled gracefully?
+                                                                Type hints     - All functions must have input/output type hints
+                                                                Docstrings     - Present and meaningful (not just restating the function name)
+                                                                Optimization   - No redundant loops, unnecessary imports, or memory waste
+                                                                Security       - No hardcoded secrets, unsafe evals, or SQL injections
+                                                            </Review_checklist>
+                                                            <output_format>
+                                                                - If status is "pass", issues can be empty or contain minor suggestions.
+                                                                - If status is "fail", at least one critical or major issue must be present.
+                                                                - Never return "fail" without actionable fixes.
+                                                            </output_format>
+                                                            <constraints>
+                                                                - Python only.
+                                                                - Do not rewrite the code — only report issues.
+                                                                - Do not pass code that is incorrect even if it looks clean.
+                                                                - Follow the Review_checklist
+                                                            </constraints>
+                                                            """
+                                                                    elif(name=="Researcher"):
+                                                                    SYSTEM_PROMPT = """
+
+
+                                                            <Role>
+                                                                You are an Excelent Researcher who can understand the query give research context
+                                                            </Role>
+                                                            <Objective>
+                                                                Extract specific, actionable research that directly serves the coder and reviewer agents.
+                                                                Do NOT return generic overviews — return targeted facts, code patterns, docs, and examples.
+                                                            </Objective>
+
+                                                            <Instructions>
+                                                                1. Analyze the both the user query and review output if present.
+                                                                2. Research about the functionalities.
+                                                                3. Give a detailed output about query.
+                                                            </Instructions>
+
+                                                            """
+                                                                    elif(name=="Decider"):
+                                                                        SYSTEM_PROMPT = """
+                                                            <Role>
+                                                                You are a decision-making and intent-identifier agent.
+                                                                Analyze the user input and return output strictly in valid JSON format.
+                                                            </Role>
+
+                                                            <Objective>
+                                                                - Identify the user's intent and route it to the correct agent.
+                                                                - Ask for clarification when the user query is incomplete or ambiguous.
+                                                                - Use previous conversation context to understand follow-up queries.
+                                                                - Refuse requests that are not relevant to the business use case.
+                                                            </Objective>
+
+                                                            <Instructions>
+                                                                1. Analyze the user query carefully.
+                                                                2. Check whether the query is relevant to the business use case: coding, reviewing, or researching.
+                                                                3. If the query is missing context or is too vague, set decision to "need_details" and ask for clarification in llm_response.
+                                                                4. If the query is not relevant to the business, set relevant_to_business to false and explain in llm_response.
+                                                                5. If previous conversation exists, check if the current query relates to it and set is_relevant_to_past_conversation accordingly.
+                                                                6. Return ONLY a valid JSON object. Do NOT include markdown, code fences, or extra explanation.
+                                                                7. Always use null (not None) for empty fields.
+                                                                8. When you check for is_relevant_to_past_conversation check whether user query is contnuation.Even if the past and user_query have same words.Always analyze the query before makeing the decision.
+                                                            </Instructions>
+
+                                                            <Agents>
+                                                                "coding"       - User wants ONLY code generated, no research needed.
+                                                                "review"       - User provides existing code and wants it reviewed.
+                                                                "research"     - User wants ONLY explanation, concepts, or documentation.
+                                                                "both"         - User wants code generated AND a research/explanation.
+                                                                "need_details" - Query is too vague or missing context; clarification is needed.
+                                                            </Agents>
+
+                                                            <Output>
+                                                            Return ONLY this JSON with no additional text:
+                                                            {
+                                                                "decision": "coding" | "review" | "research" | "both" | "need_details",
+                                                                "research_only": true | false,
+                                                                "relevant_to_business": true | false,
+                                                                "llm_response": "<message to user when clarification or refusal is needed>" | null
+                                                            }
+
+                                                            Rules:
+                                                                - research_only is true ONLY when decision is "research", otherwise false.
+                                                                - is_relevant_to_past_conversation is true only when past conversation exists AND the current query relates to it.
+                                                                - llm_response must contain a message when decision is "need_details" or relevant_to_business is false.
+                                                                - llm_response must be null when the intent is clear and no clarification is needed.
+                                                                - "both" means decision="both" and research_only=false.
+                                                                - Never use Python literals. Use JSON-compliant values: null, true, false.
+                                                            </Output>
+                                                            """
+                                                            end note
+                                                            PromptBuilder --> Agent : return system_prompt
+                                                        end
+                                                    end
+                                                    deactivate PromptBuilder
+                                                    Agent -> Agent: creat a empty tool list as tools
+                                                    alt if mcp_url present means
+                                                        Agent -> Agent : create mcp_client as MultiServerMCPClient
+                                                        note over Agent
+                                                            mcp_client = MultiServerMCPClient(
+                                                                {
+                                                                    "mcp_server": {
+                                                                        "transport": "streamable_http",
+                                                                        "url": MCP_SERVER_URL
+                                                                    }
+                                                                }
+                                                            )
+                                                        end note
+                                                        Agent -> Agent : call the get_tools method to get the tools from the service
+                                                    end
+                                                    Agent -> Agent : call fetch_bedrock_llm from BedrockLlm and store in llm variable
+                                                    Agent -> BedrockLlm : move to BedrockLlm to create LLM instance
+                                                    activate BedrockLlm
+                                                    group BedrockLlm
+                                                        group fetch_bedrock_llm — create LLM client
+                                                            alt try
+                                                                BedrockLlm -> BedrockLlm : call create_bedrock_client to get AWS client
+                                                                BedrockLlm -> BedrockClient : move to BedrockClient to create AWS client
+                                                                activate BedrockClient
+                                                                group BedrockClient
+                                                                    group create_bedrock_client — initialize AWS Bedrock client
+                                                                        alt try
+                                                                            BedrockClient -> BedrockClient : create boto3 bedrock-runtime client using region config
+                                                                            note over BedrockClient
+                                                                                boto3.client(
+                                                                                    service_name="bedrock-runtime",
+                                                                                    region_name=REGION
+                                                                                )
+                                                                            end note
+                                                                            BedrockClient --> BedrockLlm : return bedrock_client
+                                                                        else exception
+                                                                            BedrockClient --> BedrockLlm : raise an Exception
+                                                                        end
+                                                                    end
+                                                                end
+                                                                deactivate BedrockClient
+
+                                                                BedrockLlm -> BedrockLlm : create ChatBedrock instance and store in llm variable
+                                                                note over BedrockLlm
+                                                                    ChatBedrock(
+                                                                        client=bedrock_client,
+                                                                        model_id=MODEL_ID,
+                                                                        provider="amazon",
+                                                                        model_kwargs={
+                                                                            "max_tokens": 5000,
+                                                                            "temperature": 0.7
+                                                                        }
+                                                                    )
+                                                                end note
+                                                                BedrockLlm --> Agent : return llm instance
+                                                            else exception
+                                                                BedrockLlm --> Agent : raise an exception
+                                                            end
+                                                        end
+                                                    end
+                                                    deactivate BedrockLlm
+
+                                                    Agent -> Agent : call build_create_agent on agent_builder with system_prompt, llm, tools
+                                                    Agent -> AgentBuilder : delegate to AgentBuilder to build the agent
+                                                    activate AgentBuilder
+                                                    group AgentBuilder
+                                                        group build_create_agent — assemble LangGraph agent
+                                                            alt try
+                                                                note over AgentBuilder
+                                                                    create_agent(
+                                                                        llm=llm,
+                                                                        tools=tool_list,
+                                                                        system_prompt=system_prompt,
+                                                                        response_format=response_format
+                                                                    )
+                                                                end note
+                                                                AgentBuilder -> AgentBuilder : assemble and return agent
+                                                                AgentBuilder --> Agent : return assembled agent
+                                                            else exception
+                                                                AgentBuilder --> Agent : raise an exception
+                                                            end
+                                                        end
+                                                    end
+                                                    deactivate AgentBuilder
+
+                                                    Agent -> Agent : store returned value in agent variable
+                                                    Agent -> Agent : invoke agent with user_query and store output in agent_response
+                                                    Agent -> LlmResponseHandler : call llm_response_handler to structure the response
+                                                    activate LlmResponseHandler
+                                                    group LlmResponseHandler
+                                                        group llm_response_handler — parse and clean agent output
+                                                            alt if agent_response has structured_response
+                                                                LlmResponseHandler -> LlmResponseHandler : return structured_response directly
+                                                            end
+                                                            LlmResponseHandler -> LlmResponseHandler : extract message from agent_response
+                                                            LlmResponseHandler -> LlmResponseHandler : call strip_thinking to remove thinking tags from response
+                                                            group strip_thinking — remove internal reasoning from output
+                                                                LlmResponseHandler -> LlmResponseHandler : find thinking start index and end index
+                                                                LlmResponseHandler -> LlmResponseHandler : replace thinking block with empty string
+                                                                LlmResponseHandler --> LlmResponseHandler : return cleaned response to llm_response_handler
+                                                            end
+                                                            LlmResponseHandler --> Agent : return structured agent_response
+                                                        end
+                                                    end
+                                                    deactivate LlmResponseHandler
+
+                                                    Agent -> Agent : agent selects appropriate tool via mcp_server based on user_query
+                                                    Agent --> GraphNodes : return agent_response
+
+                                                else exception
+                                                    Agent -> Agent : raise client_error with status 500
+                                                    note right Agent
+                                                        Error Response — 500:
+                                                        {
+                                                          "code": 500,
+                                                          "status": "error",
+                                                          "message": "Error Occurred",
+                                                          "error": {
+                                                            "code": "001",
+                                                            "message": "Client error"
+                                                          },
+                                                          "request_id": "123e4567-e89b-12d3-a456-426655440000",
+                                                          "timestamp": "2024-01-01T12:00:00.000Z"
+                                                        }
+                                                    end note
+                                                    Agent --> GraphNodes : return error to GraphNodes
+                                                end
+                                            end
+                                        end
+                                        deactivate Agent
+
+                                        group user_intent_identifier — identify user intent via decision LLM
+                                            alt try
+                                                GraphNodes -> GraphNodes : construct user_query variable from state
+                                                    GraphNodes -> GraphNodes : append previous messages as conversation history to user_query
+                                                GraphNodes -> DecisionMakerLlm : call llm_call with user_query and store result in llm_decision
+                                                activate DecisionMakerLlm
+                                                group DecisionMakerLlm
+                                                    group __init__ — initialize decision LLM dependencies
+                                                        DecisionMakerLlm -> BedrockLlm : call create_bedrock_client and store in bedrock_client variable
+                                                        activate BedrockLlm
+                                                        group BedrockLlm
+                                                            group fetch_bedrock_llm — create LLM client
+                                                                alt try
+                                                                    BedrockLlm -> BedrockLlm : call create_bedrock_client to get AWS client
+                                                                    BedrockLlm -> BedrockClient : move to BedrockClient to create AWS client
+                                                                    activate BedrockClient
+                                                                    group BedrockClient
+                                                                        group create_bedrock_client — initialize AWS Bedrock client
+                                                                            alt try
+                                                                                BedrockClient -> BedrockClient : create boto3 bedrock-runtime client using region config
+                                                                                note over BedrockClient
+                                                                                    boto3.client(
+                                                                                        service_name="bedrock-runtime",
+                                                                                        region_name=REGION
+                                                                                    )
+                                                                                end note
+                                                                                BedrockClient --> BedrockLlm : return bedrock_client
+                                                                            else exception
+                                                                                BedrockClient --> BedrockLlm : raise an Exception
+                                                                            end
+                                                                        end
+                                                                    end
+                                                                    deactivate BedrockClient
+
+                                                                    BedrockLlm -> BedrockLlm : create ChatBedrock instance and store in llm variable
+                                                                    note over BedrockLlm
+                                                                        ChatBedrock(
+                                                                            client=bedrock_client,
+                                                                            model_id=MODEL_ID,
+                                                                            provider="amazon",
+                                                                            model_kwargs={
+                                                                                "max_tokens": 5000,
+                                                                                "temperature": 0.7
+                                                                            }
+                                                                        )
+                                                                    end note
+                                                                    BedrockLlm --> DecisionMakerLlm: return llm instance
+                                                                else exception
+                                                                    BedrockLlm --> DecisionMakerLlm : raise an exception
+                                                                end
+                                                            end
+                                                        end
+                                                        deactivate BedrockLlm
+
+                                                        DecisionMakerLlm -> PromptBuilder : call get_system_prompt and pass "Decider" as argument
+                                                        activate PromptBuilder
+                                                        group PromptBuilder
+                                                            group get_system_prompt — retrieve decider system prompt
+                                                                PromptBuilder -> PromptBuilder : retrieve appropriate prompt based on name parameter
+                                                                PromptBuilder --> DecisionMakerLlm : return system_prompt
+                                                            end
+                                                        end
+                                                        deactivate PromptBuilder
+
+                                                        DecisionMakerLlm -> DecisionMakerLlm : get max_tokens and temperature from  constants
+                                                    end
+
+                                                    group llm_call — invoke Bedrock model for intent decision
+                                                        alt try
+                                                            DecisionMakerLlm ->DecisionMakerLlm: bind the model with pydantic model for structure Response
+                                                            DecisionMakerLlm -> DecisionMakerLlm : invoke model with SytemPrompt and messages
+                                                            DecisionMakerLlm -> DecisionMakerLlm : destructure response and return model result
+                                                            note over DecisionMakerLlm
+                                                                decision_response = {
+                                                                    "decision": "coding" | "review" | "research" | "both" | "need_details",
+                                                                    "research_only": true | false,
+                                
+                                                                    "relevant_to_business": true | false,
+                                                                    "llm_response": "<message to user when clarification or refusal is needed>" | null
+                                                                }
+                                                            end note
+                                                            DecisionMakerLlm --> GraphNodes : return decision_response
+                                                        else exception
+                                                            DecisionMakerLlm --> GraphNodes : raise an exception if there is any error
+                                                        end
+                                                    end
+                                                end
+                                                deactivate DecisionMakerLlm
+                                                GraphNodes -> GraphNodes : update decision_llm_output attribute in State with llm_decision and llm_messages
+                                            else exception
+                                                GraphNodes --> AgentService : raise an exception if any error happens
+                                            end
+                                        end
+
+                                        group code_agent_node — run CoderAgent
+                                            alt try
+                                                GraphNodes -> GraphNodes : construct user_query based on conditions such as code_agent_output or review_agent_output in state
+                                                GraphNodes -> CoderAgent : call invoke_agent using code_agent instance and store result in code_agent_response
+                                                activate CoderAgent
+                                                group CoderAgent — inherits Agent
+                                                    group __init__ — set agent identity and response format
+                                                        CoderAgent -> CoderAgent : assign agent_name as "CoderAgent"
+                                                        CoderAgent -> CoderAgent : assign response_format as CodeResponse
+                                                    end
+                                                    CoderAgent -> Agent : call invoke_agent from base Agent class
+                                                    activate Agent
+                                                    group Agent
+                                                        group invoke_agent — build and run CoderAgent
+                                                            note over Agent
+                                                                refer Agent invoke_agent flow above
+                                                                for full MCP, LLM, AgentBuilder steps
+                                                            end note
+                                                            Agent --> CoderAgent : return code_agent_response
+                                                        end
+                                                    end
+                                                    deactivate Agent
+                                                    CoderAgent --> GraphNodes : return code_agent_response
+                                                end
+                                                deactivate CoderAgent
+                                                GraphNodes -> GraphNodes : update code_agent_output in State with code_agent_response and code_messages
+                                            else exception
+                                                GraphNodes --> AgentService : raise an exception if any error happens
+                                            end
+                                        end
+
+                                        group review_agent_node — run ReviewerAgent
+                                            alt try
+                                                GraphNodes -> GraphNodes : construct user_query based on conditions such as code_agent_output or review_agent_output in state
+                                                GraphNodes -> ReviewerAgent: call invoke_agent using review_agent instance and store result in review_agent_response
+                                                activate ReviewerAgent
+                                                group ReviewerAgent — inherits Agent
+                                                    group __init__ — set agent identity and response format
+                                                        ReviewerAgent -> ReviewerAgent : assign agent_name as "ReviewerAgent"
+                                                        ReviewerAgent -> ReviewerAgent : assign response_format as ReviewResponse
+                                                    end
+                                                    ReviewerAgent -> Agent : call invoke_agent from base Agent class
+                                                    activate Agent
+                                                    group Agent
+                                                        group invoke_agent — build and run ReviewerAgent
+                                                            note over Agent
+                                                                refer Agent invoke_agent flow above
+                                                                for full MCP, LLM, AgentBuilder steps
+                                                            end note
+                                                            Agent --> ReviewerAgent : return review_agent_response
+                                                        end
+                                                    end
+                                                    deactivate Agent
+                                                    ReviewerAgent --> GraphNodes : return review_agent_response and messages
+                                                end
+                                                deactivate ReviewerAgent
+                                                GraphNodes -> GraphNodes : update reviewer_agent_output in State with review_agent_response and review_messages
+                                            else exception
+                                                GraphNodes --> AgentService : raise an exception if any error happens
+                                            end
+                                        end
+
+                                        group research_agent_node — run ResearcherAgent
+                                            alt try
+                                                GraphNodes -> GraphNodes : construct user_query based on conditions such as code_agent_output or research_agent_output in state
+                                                GraphNodes -> ResearcherAgent : call invoke_agent using research_agent instance and store result in research_agent_response
+                                                activate ResearcherAgent
+                                                group ResearcherAgent — inherits Agent
+                                                    group __init__ — set agent identity and response format
+                                                        ResearcherAgent -> ResearcherAgent : assign agent_name as "ResearcherAgent"
+                                                        ResearcherAgent -> ResearcherAgent : assign response_format as ResearchResponse
+                                                    end
+                                                    ResearcherAgent -> Agent : call invoke_agent from base Agent class
+                                                    activate Agent
+                                                    group Agent
+                                                        group invoke_agent — build and run ResearcherAgent
+                                                            note over Agent
+                                                                refer Agent invoke_agent flow above
+                                                                for full MCP, LLM, AgentBuilder steps
+                                                            end note
+                                                            Agent --> ResearcherAgent : return research_agent_response
+                                                        end
+                                                    end
+                                                    deactivate Agent
+                                                    ResearcherAgent --> GraphNodes : return research_agent_response
+                                                end
+                                                deactivate ResearcherAgent
+                                                GraphNodes -> GraphNodes : update researcher_agent_output in State with research_agent_response and research_messages
+                                            else exception
+                                                GraphNodes --> AgentService : raise an exception if any error happens
+                                            end
+                                        end
+                                    end
+                                    deactivate GraphNodes
+
+                                    AgentService -> AgentService : add conditional edges route_intent and add the dictionary of nodes where to route based on the returned string: {"coder":"coderagent","reviewer":"revieweragent","research":"researcheragent","rejected":END,"need_details":END,"both":"researcheragent"}
+                                    AgentService -> AgentService : add conditional edge review_conditon and the dictionary of nodes where to route based on the returned boolean {True:END,False:"researcheragent"}
+                                    AgentService -> AgentService : add conditional edge research_conditon and the dictionary of nodes where to route based on the returned boolean {True:END,False:"coderagent"}
+                                    AgentService -> ConditionalEdges : move conditional edge definitions to ConditionalEdges
+                                    activate ConditionalEdges
+                                    group ConditionalEdges
+                                        group route_intent — determine routing based on decision LLM output
+                                            alt try
+                                                alt if state - decision_llm_output has relevant_to_business is true
+                                                    ConditionalEdges -> ConditionalEdges: pass the decision to the as decider dictionary get the apprpriate value
+                                                    note over ConditionalEdges
+                                                    intent_decider={
+                                                        "coding":"code",
+                                                        "review":"review",
+                                                        "research":"research",
+                                                        "both":"research",
+                                                        "need_details":"need_details"
+                                                    }
+                                                    end note
+                                                else
+                                                    ConditionalEdges -> ConditionalEdges : return "rejected"
+                                                end
+                                            else exception
+                                                ConditionalEdges --> AgentService : raise an exception if any error happens
+                                            end
+                                        end
+
+                                        group review_condition — check if review passed
+                                            alt try
+                                                alt if reviewer_agent_output in state has review_passed as true
+                                                    ConditionalEdges -> ConditionalEdges : return True
+                                                else
+                                                    ConditionalEdges -> ConditionalEdges : return False
+                                                end
+                                            else exception
+                                                ConditionalEdges --> AgentService : raise an exception if any error happens
+                                            end
+                                        end
+
+                                        group research_condition — check if research only
+                                            alt try
+                                                alt if decision_llm_output in state has research_only as true
+                                                    ConditionalEdges -> ConditionalEdges : return True
+                                                else
+                                                    ConditionalEdges -> ConditionalEdges : return False
+                                                end
+                                            else exception
+                                                ConditionalEdges --> AgentService : raise an exception if any error happens
+                                            end
+                                        end
+                                    end
+                                    deactivate ConditionalEdges
+
+                                    AgentService -> AgentService : compile graph with checkpointer and store in compiled_graph variable
+                                    AgentService --> AgentService : return compiled_graph
+                                else exception
+                                    AgentService --> AgentService : raise an exception if any error happens
+                                end
+                            end
+
+                            AgentService -> AgentService : invoke compiled_graph with user_query and thread_id
+                            AgentService -> AgentService  : call the output_formatter  function to format the output 
+                            group output_formatter - format the response
+                                alt try
+                                    AgentService -> AgentService: create two varaible response and code with empty values
+                                    AgentService -> AgentService : extract the decision from the decision-llm_output and store it in decision variable
+                                    alt if state - decision_llm_output - relevant_to_business is not true
+                                        AgentService ->AgentService : response equal to llm_response
+                                    end
+                                    alt elif if state - decision_llm_output - research_only is  true
+                                        AgentService ->AgentService : response equal to research_agent_output
+                                    end
+                                    alt elif if state - decision_llm_output - review_only is true
+                                            AgentService ->AgentService : response equal to review_agent_response improvements
+                                    end
+                                    alt
+                                        alt decision is coding and both
+                                            AgentService ->AgentService : response equal to code_agent_output response key
+                                            AgentService ->AgentService : code equal to code_agent_output code key
+                                        end
+                                        alt decision is need_details
+                                           AgentService ->AgentService : response equal to llm_response
+                                        end
+                                    end
+                                    AgentService --> AgentService : return the response to the agent_service
+                                    AgentService --> AgentRouter : response is returned to the router
+                                    
+                                else exception
+                                AgentService --> AgentService : raise an exception if any error happens
+                                end
+                            end
+
+                        else exception
+                            alt if NotFoundError
+                                AgentService -> AgentService : raise NotFoundException
+                            end
+                            alt if BadRequestError
+                                AgentService -> AgentService : raise BadRequestException
+                            end
+                            note right AgentService
+                                Error Response — 404:
+                                {
+                                  "code": 404,
+                                  "status": "error",
+                                  "message": "Error Occurred",
+                                  "error": {
+                                    "code": "002",
+                                    "message": "id is not found"
+                                  },
+                                  "request_id": "req-123-456-789",
+                                  "timestamp": "2024-01-01T12:00:00.000Z"
+                                }
+                            end note
+                            AgentService --> AgentRouter : return error to AgentRouter
+                        end
+                    end
+                end
+                deactivate AgentService
+
+                AgentRouter -> AgentRouter : call format_success_response with message, code, graph_response as arguments
+                AgentRouter -> ResponseFormatter : move to ResponseFormatter to build success response
+                activate ResponseFormatter
+                group ResponseFormatter
+                    group format_success_response — build API success response
+                        ResponseFormatter -> ResponseFormatter : create success_response using APIResponse model
+                        ResponseFormatter -> ValidationModel : fetch APIResponse model
+                        activate ValidationModel
+                        group ValidationModel
+                            group APIResponse — response structure
+                                ValidationModel -> ValidationModel : return APIResponse model
+                                ValidationModel --> ResponseFormatter : return APIResponse model
+                            end
+                        end
+                        deactivate ValidationModel
+                        note right ResponseFormatter
+                            Success Response — 200:
+                            {
+                              "code": 200,
+                              "status": "success",
+                              "message": "llm response is fetched",
+                              "data": "The response of the llm",
+                              "request_id": "ef5b4146-68ca-43e1-a32c-d875a3246be3",
+                              "timestamp": "2026-01-21T14:33:52.540758"
+                            }
+                        end note
+                        ResponseFormatter --> AgentRouter : return formatted_success_response
+                    end
+                end
+                deactivate ResponseFormatter
+
+                AgentRouter --> Main : return formatted_success_response
+                note over Main
+                    Success Response — 200:
+                    {
+                      "code": 200,
+                      "status": "success",
+                      "message": "llm response is fetched",
+                      "data": {
+                      "response":"The response of the llm",
+                      "code": Optional - When there is code.
+                      },
+                      "request_id": "ef5b4146-68ca-43e1-a32c-d875a3246be3",
+                      "timestamp": "2026-01-21T14:33:52.540758"
+                    }
+                end note
+                Main --> Client : return success_response
+
+            else exception
+                alt if NotFoundError
+                    AgentRouter -> AgentRouter : set code 404 and message "Not Found"
+                end
+                alt if DatabaseError
+                    AgentRouter -> AgentRouter : set code 500 and message "Database Error"
+                end
+                alt if BadRequestError
+                    AgentRouter -> AgentRouter : set code 400 and message "Bad Request"
+                end
+
+                AgentRouter -> AgentRouter : call format_error_response with message and code as arguments
+                AgentRouter -> ResponseFormatter : move to ResponseFormatter to build error response
+                activate ResponseFormatter
+                group ResponseFormatter
+                    group format_error_response — build API error response
+                        ResponseFormatter -> ResponseFormatter : create error_response using APIResponse model
+                        ResponseFormatter -> ValidationModel : fetch APIResponse model
+                        activate ValidationModel
+                        group ValidationModel
+                            group APIResponse — response structure
+                                ValidationModel -> ValidationModel : return APIResponse model
+                                ValidationModel --> ResponseFormatter : return APIResponse model
+                            end
+                        end
+                        deactivate ValidationModel
+                        note right ResponseFormatter
+                            Error Response — 500:
+                            {
+                              "code": 500,
+                              "status": "error",
+                              "message": "Error Occurred",
+                              "error": {
+                                "code": "001",
+                                "message": "Server is not running"
+                              },
+                              "request_id": "123e4567-e89b-12d3-a456-426655440000",
+                              "timestamp": "2024-01-01T12:00:00.000Z"
+                            }
+                        end note
+                        ResponseFormatter --> AgentRouter : return formatted_error_response
+                    end
+                end
+                deactivate ResponseFormatter
+
+                AgentRouter --> Main : return formatted_error_response
+                deactivate AgentRouter
+
+                note over Main
+                    Error Response — 500:
+                    {
+                      "code": 500,
+                      "status": "error",
+                      "message": "Error Occurred",
+                      "error": { "code": "001", "message": "Server is not running" },
+                      "request_id": "123e4567-e89b-12d3-a456-426655440000",
+                      "timestamp": "2024-01-01T12:00:00.000Z"
+                    }
+                end note
+                note over Main
+                    Error Response — 404:
+                    {
+                      "code": 404,
+                      "status": "error",
+                      "message": "Error Occurred",
+                      "error": { "code": "002", "message": "id is not found" },
+                      "request_id": "123e4567-e89b-12d3-a456-426655440000",
+                      "timestamp": "2024-01-01T12:00:00.000Z"
+                    }
+                end note
+                note over Main
+                    Error Response — 400:
+                    {
+                      "code": 400,
+                      "status": "error",
+                      "message": "Bad Request",
+                      "error": { "code": "003", "message": "url or uuid in wrong format" },
+                      "request_id": "123e4567-e89b-12d3-a456-426655440000",
+                      "timestamp": "2024-01-01T12:00:00.000Z"
+                    }
+                end note
+                note over Main
+                    Error Response — 422:
+                    {
+                      "code": 422,
+                      "status": "error",
+                      "message": "Unprocessable Content",
+                      "error": { "code": "004", "message": "Pydantic validation failed" },
+                      "request_id": "123e4567-e89b-12d3-a456-426655440000",
+                      "timestamp": "2024-01-01T12:00:00.000Z"
+                    }
+                end note
+                Main --> Client : return error_response
+            end
+        end
+    end
+
+deactivate Main
+deactivate Client
+
+@enduml

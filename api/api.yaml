@@ -1,0 +1,366 @@
+openapi: 3.0.3
+info:
+  title: Intelligent Operations Assistant
+  description: HR/IT policy chatbot backed by LangGraph + PgVector + Gemini
+  version: 2.0.0
+
+tags:
+  - name: Chat
+    description: Conversational policy assistant
+  - name: Documents
+    description: Knowledge-base document ingestion
+  - name: Health
+    description: Service health check
+
+paths:
+
+  # ──────────────────────────────────────────────
+  # POST /api/v1/chat
+  # ──────────────────────────────────────────────
+  /api/v1/chat:
+    post:
+      tags:
+        - Chat
+      summary: Send a message to the assistant
+      description: |
+        Sends a user message to the LangGraph workflow.
+        - If `session_id` is omitted or null a new session is created and returned.
+        - When the graph is waiting for human confirmation (`awaiting_confirmation: true`)
+          the next call must send the employee's yes/no reply against the **same** `session_id`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChatRequest"
+            examples:
+              new_session:
+                summary: First message — no session yet
+                value:
+                  employee_id: "emp_1023"
+                  session_id: null
+                  message: "How do I request VPN access?"
+              existing_session:
+                summary: Follow-up in an existing session
+                value:
+                  employee_id: "emp_1023"
+                  session_id: "550e8400-e29b-41d4-a716-446655440000"
+                  message: "What documents do I need to submit?"
+              confirmation_reply:
+                summary: Replying to an escalation confirmation prompt
+                value:
+                  employee_id: "emp_1023"
+                  session_id: "550e8400-e29b-41d4-a716-446655440000"
+                  message: "yes"
+      responses:
+        '200':
+          description: Normal assistant response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+              example:
+                code: 200
+                status: "success"
+                message: "LLM response"
+                data:
+                  session_id: "550e8400-e29b-41d4-a716-446655440000"
+                  response: "To request VPN access, submit a ticket via the IT portal..."
+                  sources: ["VPN Access Policy v2.1"]
+                  escalated: false
+                  awaiting_confirmation: false
+                request_id: "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+                timestamp: "2026-03-10T14:18:11"
+        '200_awaiting':
+          description: Graph paused — waiting for employee confirmation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+              example:
+                code: 200
+                status: "success"
+                message: "LLM response"
+                data:
+                  session_id: "550e8400-e29b-41d4-a716-446655440000"
+                  response: "This request requires IT approval. Should I escalate this to the IT team?"
+                  sources: []
+                  escalated: false
+                  awaiting_confirmation: true
+                request_id: "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+                timestamp: "2026-03-10T14:18:11"
+        '403':
+          description: employee_id does not match the session owner
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                code: 403
+                status: "Error"
+                message: "Access denied"
+                error:
+                  code: "ZAP_AUTH_026"
+                  message: "Access denied"
+                  details: {}
+                request_id: "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+                timestamp: "2026-03-10T14:18:11"
+        '404':
+          description: session_id not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                code: 404
+                status: "Error"
+                message: "session_id not found"
+                error:
+                  code: "ZAP_GEN_030"
+                  message: "session_id not found"
+                  details: {}
+                request_id: "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+                timestamp: "2026-03-10T14:18:11"
+        '422':
+          description: Pydantic validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                code: 422
+                status: "Error"
+                message: "Pydantic Validation"
+                error:
+                  code: "ZAP_VAL_022"
+                  message: "Pydantic validation error"
+                  details: {}
+                request_id: "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+                timestamp: "2026-03-10T14:18:11"
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                code: 500
+                status: "Error"
+                message: "Server Error"
+                error:
+                  code: "ZAP_SRV_006"
+                  message: "Server Error"
+                  details: {}
+                request_id: "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+                timestamp: "2026-03-10T14:18:11"
+
+  # ──────────────────────────────────────────────
+  # POST /api/v1/documents/upload
+  # ──────────────────────────────────────────────
+  /api/v1/documents/upload:
+    post:
+      tags:
+        - Documents
+      summary: Upload a policy document into the knowledge base
+      description: |
+        Accepts PDF, DOCX, or TXT files. Chunks the document, generates
+        Google embeddings, and stores them in PgVector.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+                - file
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: The document to ingest (PDF / DOCX / TXT)
+      responses:
+        '200':
+          description: Document successfully ingested
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+              example:
+                code: 200
+                status: "success"
+                message: "Document ingested"
+                data:
+                  filename: "vpn_policy.pdf"
+                  chunks_indexed: 14
+                  status: "success"
+                request_id: "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+                timestamp: "2026-03-10T14:18:11"
+        '400':
+          description: Unsupported file type
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                code: 400
+                status: "Error"
+                message: "Unsupported file type. Supported types: pdf, docx, txt"
+                error:
+                  code: "ZAP_VAL_022"
+                  message: "Unsupported file type"
+                  details: {}
+                request_id: "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+                timestamp: "2026-03-10T14:18:11"
+        '422':
+          description: Pydantic / request validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ──────────────────────────────────────────────
+  # GET /api/v1/health
+  # ──────────────────────────────────────────────
+  /api/v1/health:
+    get:
+      tags:
+        - Health
+      summary: Service health check
+      description: Returns 200 when the service is up and DB connectivity is confirmed.
+      responses:
+        '200':
+          description: Service healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+              example:
+                code: 200
+                status: "success"
+                message: "Service is healthy"
+                data:
+                  db: "ok"
+                  vector_store: "ok"
+                request_id: "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+                timestamp: "2026-03-10T14:18:11"
+        '500':
+          description: Service unhealthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+# ──────────────────────────────────────────────
+# Shared Schemas
+# ──────────────────────────────────────────────
+components:
+  schemas:
+
+    ChatRequest:
+      type: object
+      required:
+        - employee_id
+        - message
+      properties:
+        employee_id:
+          type: string
+          description: Identifier of the requesting employee
+          example: "emp_1023"
+        session_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: |
+            Existing session UUID. Omit or send null to start a new session.
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        message:
+          type: string
+          minLength: 1
+          description: The employee's message or confirmation reply
+          example: "How do I request VPN access?"
+
+    ChatResponseData:
+      type: object
+      properties:
+        session_id:
+          type: string
+          format: uuid
+        response:
+          type: string
+          description: Assistant's answer or confirmation question
+        sources:
+          type: array
+          items:
+            type: string
+          description: Source document names used to generate the response
+        escalated:
+          type: boolean
+          description: True if an escalation record was created
+        awaiting_confirmation:
+          type: boolean
+          description: True when the graph is paused waiting for the employee's yes/no
+
+    UploadResponseData:
+      type: object
+      properties:
+        filename:
+          type: string
+        chunks_indexed:
+          type: integer
+        status:
+          type: string
+          enum: [success, failed]
+
+    SuccessResponse:
+      type: object
+      properties:
+        code:
+          type: integer
+          example: 200
+        status:
+          type: string
+          example: "success"
+        message:
+          type: string
+        data:
+          type: object
+          description: Payload — shape depends on the endpoint
+        request_id:
+          type: string
+          format: uuid
+        timestamp:
+          type: string
+          format: date-time
+
+    ErrorResponse:
+      type: object
+      properties:
+        code:
+          type: integer
+          example: 500
+        status:
+          type: string
+          example: "Error"
+        message:
+          type: string
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+            details:
+              type: object
+        request_id:
+          type: string
+          format: uuid
+        timestamp:
+          type: string
+          format: date-time

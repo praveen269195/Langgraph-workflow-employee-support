@@ -1,0 +1,201 @@
+@startuml class_diagram
+skinparam classAttributeIconSize 0
+skinparam classFontSize 10
+skinparam packageStyle rectangle
+skinparam Linetype ortho
+
+
+package "Application Layer" {
+    class Main <<src/main.py>> {
+        +create_app()
+        +initialize_config()
+        +run_local_server()
+    }
+}
+
+package "Routes Layer" {
+    class AgentRouter <<src/routes/router.py>> {
+        -chat_service: AgentService
+        +process_query_route(request_data: RequestBody): APIResponse
+    }
+}
+
+package "Service Layer"{
+    class AgentService <<src/service/agentservice.py>>{
+        -conditional_edges:ConditionalEdges
+        -graph_node:GraphNodes
+        +agent_service(user_request:UserRequest)
+        +graph_builder(checkpointer)
+        +output_formatter(state:State):
+    }
+    class ConditionalEdges <<src/service/condional_edge_service.py>>{
+        +route_intent(state:State):
+        +review_condition(state:State):
+        +research_condition(state:State)
+    }
+    class GraphNodes <<src/service/graph_nodes.py>>{
+        -code_agent:CoderAgent
+        -review_agent:ReviewerAgent
+        -research_agent:ResearcherAgent
+        +user_intent_identifier(state:State):
+        +code_agent_node(state:State):
+        +review_agent_node(state:State):
+        +research_agent_node(state:State):
+    }
+}
+
+package "Agent Layer" {
+    class Agent <<src/agents/agent.py>> {
+        -prompt_builder: PromptBuilder
+        -agent_builder:AgentBuilder
+        -mcp_loader:McpLoader
+        -response_builder:LlmResponseHandler
+        +invoke_agent(query):
+    }
+    class CoderAgent <<src/agents/coderagent.py>>{
+        self.response_format:codeResponse
+    }
+    class ReviewerAgent <<src/agents/revieweragent.py>>{
+        self.response_format:ReviewResponse
+    }
+    class ResearcherAgent <<src/agents/researcheragent.py>>{
+        self.response_format:ResearchResponse
+    }
+    class PromptBuilder <<src/agents/prompt.py>> {
+        +fetch_system_prompt(name:str): str
+    }
+    class AgentBuilder <<src/agents/agent_builder.py>> {
+        +build_create_agent(llm, tools, system_prompt, checkpointer)
+    }
+    class BedrockLlm <<src/agents/langchain_llm.py>> {
+        +fetch_bedrock_llm(max_tokens: int, temperature: float)
+    }
+}
+package "Repository Layer" {
+    class Database <<src/repositories/database.py>> {
+        +initialize_engine()
+        +create_session()
+    }
+    class LogRepository <<src/repositories/log_repository.py>> {
+        +save_error_log(error: Error)
+    }
+}
+
+package "Models" {
+    class APIResponse <<src/models/model.py>> {
+        +code: int
+        +status: str
+        +message: str
+        +data: Optional[Any]
+        +error: Optional[dict]
+        +request_id: str
+        +timestamp: str
+    }
+    class UserRequest <<src/models/model.py>>{
+        +user_query:str
+        +thread_id:uuid
+    }
+
+    class Error <<src/models/model.py>> {
+        +function_name: str
+        +status_code: int
+        +file_name: str
+        +error_message: str
+    }
+    class State<<src/models/model.py>>{
+        user_query:list
+        llm_messages:list[str]
+        codemessages:list[str]
+        reviewmessages:list[str]
+        researchmessages:list[str]
+        decision_llm_output:DeciderResponse
+        code_agent_output:codeResponse
+        reviewer_agent_output:ReviewResponse
+        resercher_agent_output:str
+    }
+    class OutputForamt<<src/models/model.py>>{
+        response:str
+        code:str
+    }
+    class DeciderResponse<<src/models/model.py>>{
+    decision: str
+    research_only: bool
+    review_only: bool
+    relevant_to_business: bool
+    llm_response: Optional[str]
+    }
+    class CodeResponse<<src/models/model.py>>{
+        response:str
+        code:str
+    }
+    class ReviewResponse<<src/models/model.py>>{
+        code:str
+        improvements:str
+        review_passed:bool
+    }
+    class ResearchResponse<<src/models/model.py>>{
+         output:str
+    }
+}
+
+package "Utils" {
+    class ResponseFormatter <<src/utils/response_utils.py>> {
+        +format_success_response()
+        +format_error_response()
+    }
+    class ErrorLogHandler <<src/utils/error_log_handler_utils.py>> {
+        +log_error_details(error: Error)
+    }
+    class LlmResponseHandler <<src/utils/llm_response_utils.py>>{
+        +llm_response_handler(response:dict):dict
+        +strip_thinking(response:str):str
+    }
+    class BedrockClient <<src/utils/bedrock_client_utils.py>> {
+        +create_bedrock_client()
+    }
+    Class DecisonMakerLLm <<src/utils/decision_maker_utils.py>>{
+        +decision_maker_llm(query):
+   }
+}
+
+package "Schemas" {
+    class ErrorLog <<src/repositories/schemas/schema.py>> {
+        +error_log_id: int
+        +function_name: str
+        +file_name: str
+        +error_message: str
+        +request_id: uuid
+    }
+}
+
+Main --> AgentRouter : starts the app and registers routes
+AgentRouter --> ResponseFormatter : uses to create success and error response
+AgentRouter --> APIResponse : validates response structure
+ResponseFormatter --> APIResponse : uses to build response
+AgentRouter --> AgentService : sends query for business logic
+AgentService --> ConditionalEdges: condition for routing
+AgentService --> GraphNodes: nodes for the graph
+GraphNodes --> CoderAgent : node
+GraphNodes --> ReviewerAgent : node
+DecisonMakerLLm --> DeciderResponse: uses
+AgentService --> OutputForamt: uses
+GraphNodes --> ResearcherAgent : node
+Agent --> CoderAgent : inherits
+Agent --> ReviewerAgent :inherits
+Agent --> ResearcherAgent: inherits
+CoderAgent --> CodeResponse : response_format
+ReviewerAgent --> ReviewResponse: response_format
+ResearcherAgent --> ResearchResponse: response_format
+AgentRouter --> UserRequest:uses
+Agent --> State: common state
+Agent --> PromptBuilder : uses to get system prompt
+Agent --> AgentBuilder : uses to build create agent
+AgentBuilder --> BedrockLlm : uses to get LLM instance
+Agent --> LlmResponseHandler: to structure llm response
+BedrockLlm --> BedrockClient : uses to create AWS bedrock client
+Main --> Database : uses to initialize database on startup
+ErrorLogHandler --> Error : validates error structure
+ErrorLogHandler --> LogRepository : uses to persist error log
+LogRepository --> ErrorLog : persists to database
+
+@enduml

@@ -1,0 +1,45 @@
+[project]
+name = "task"
+version = "2.0.0"
+description = "Intelligent Operations Assistant — LangGraph + PgVector + Gemini"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    # ── Web framework ──────────────────────────────────────────────────────
+    "fastapi>=0.115.0",
+    "uvicorn>=0.30.0",
+    "python-multipart>=0.0.9",
+
+    # ── LangChain / LangGraph ──────────────────────────────────────────────
+    "langchain>=0.3.0",
+    "langchain-core>=0.3.0",
+    "langchain-community>=0.3.0",
+    "langchain-google-genai>=2.0.0",
+    "langgraph>=0.2.0",
+    "langgraph-checkpoint-postgres>=2.0.0",
+
+    # ── Google AI (embeddings + Gemini) ────────────────────────────────────
+    "google-generativeai>=0.8.0",
+
+    # ── Vector store + Postgres ────────────────────────────────────────────
+    "pgvector>=0.3.0",
+    "sqlalchemy[asyncio]>=2.0.36",
+    "asyncpg>=0.30.0",
+    "psycopg[binary]>=3.2.0",
+    "psycopg2-binary>=2.9.9",
+
+    # ── Hybrid retrieval ───────────────────────────────────────────────────
+    # BM25 is handled by ParadeDB inside Postgres — no in-process library needed.
+
+    # ── Document parsing ───────────────────────────────────────────────────
+    "pypdf>=4.0.0",
+    "python-docx>=1.1.0",
+
+    # ── Observability ──────────────────────────────────────────────────────
+    "mlflow>=2.15.0",
+
+    # ── Config / env ──────────────────────────────────────────────────────
+    "python-dotenv>=1.0.1",
+    "pydantic>=2.7.0",
+    "pydantic-settings>=2.3.0",
+]
