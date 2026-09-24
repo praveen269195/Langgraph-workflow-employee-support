@@ -78,7 +78,7 @@ flowchart TD
     RET --> GEN[generate_response]
 
     GEN -->|requires_escalation = false| END3([END — policy answer])
-    GEN -->|requires_escalation = true| CONF[confirm_escalation\n⚡ interrupt]
+    GEN -->|requires_escalation = true| CONF[confirm_escalation interrupt]
 
     CONF -->|employee says yes| END4([END — escalation record written])
     CONF -->|employee says no| END5([END — original answer returned])
